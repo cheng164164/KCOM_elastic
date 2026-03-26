@@ -1,0 +1,5 @@
+{
+  "question": "Do you have running shoes under this catalog?",
+  "top_k": 5,
+  "temperature": 0.2
+}
