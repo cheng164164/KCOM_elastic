@@ -11,7 +11,6 @@ from app.openai_client import get_azure_openai_client
 
 
 es = get_es_client()
-aoai_client = get_azure_openai_client()
 
 # # Auto-generate fields here
 # SEARCH_FIELDS = get_searchable_fields(es, ELASTIC_INDEX)
@@ -78,12 +77,12 @@ def build_context(hits: List[Dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
-def generate_answer(question: str, context: str, temperature: float) -> str:
+def generate_answer(question: str, context: str) -> str:
+    aoai_client = get_azure_openai_client()
     SYSTEM_PROMPT= "You are a helpful product assistant. Answer only from the provided Elasticsearch search results. \
                     If the search results do not contain enough information, say so clearly. Keep answers concise and factual."
     response = aoai_client.chat.completions.create(
         model=AZURE_OPENAI_CHAT_DEPLOYMENT,
-        temperature=temperature,
         messages=[
             {
                 "role": "system",
@@ -103,9 +102,8 @@ def generate_answer(question: str, context: str, temperature: float) -> str:
     return response.choices[0].message.content.strip()
 
 
-def answer_question(question: str, top_k: int = None, temperature: float = None) -> Dict[str, Any]:
+def answer_question(question: str, top_k: int = None) -> Dict[str, Any]:
     top_k = top_k or TOP_K
-    temperature = temperature if temperature is not None else 0.2
     response = es.search(
         index=ELASTIC_INDEX,
         body=build_search_query(question, top_k),
@@ -123,8 +121,7 @@ def answer_question(question: str, top_k: int = None, temperature: float = None)
     else:
         answer = generate_answer(
             question=question,
-            context=context,
-            temperature=temperature,
+            context=context
         )
 
     return {

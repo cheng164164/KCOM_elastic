@@ -12,17 +12,18 @@ def root():
     return {"message": "Elastic + Azure OpenAI chatbot is running."}
 
 
-@app.get("/health", response_model=HealthResponse, tags=["health"])
+@app.get("/health")
 def health():
     try:
-        es = get_es_client()
-        ok = es.ping()
-        if not ok:
-            raise HTTPException(status_code=503, detail="Elasticsearch is not reachable")
-        return HealthResponse(status="ok", index=ELASTIC_INDEX)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Health check failed: {exc}") from exc
-
+        es_client = get_es_client()
+        return {
+            "ping": es_client.ping(),
+            "index": ELASTIC_INDEX,
+            "index_exists": bool(es_client.indices.exists(index=ELASTIC_INDEX))
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    
 
 @app.post("/chat", tags=["chat"])
 def chat(request: ChatRequest):
@@ -33,8 +34,7 @@ def chat(request: ChatRequest):
     try:
         result = answer_question(
             question=question,
-            top_k=request.top_k,
-            temperature=request.temperature,
+            top_k=request.top_k
         )
         return result
     except Exception as exc:
