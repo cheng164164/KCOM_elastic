@@ -16,8 +16,8 @@ es = get_es_client()
 # SEARCH_FIELDS = get_searchable_fields(es, ELASTIC_INDEX)
 # print(f"[INFO] Auto-detected SEARCH_FIELDS: {SEARCH_FIELDS}")
 
-SEARCH_FIELDS=["combined_field", "body_content", "meta_description", "kx_description,headings", "kx_title", "body", "title", "meta_keywords"]
-RETURN_FIELDS=["combined_field", "body_content", "meta_description", "kx_description,headings", "kx_title", "body", "title", "meta_keywords"]
+SEARCH_FIELDS=["combined_field", "body_content", "meta_description", "kx_description", "headings", "kx_title", "body", "title", "meta_keywords"]
+RETURN_FIELDS=["combined_field", "body_content", "meta_description", "kx_description", "headings", "kx_title", "body", "title", "meta_keywords"]
 
 def safe_text(value: Any, max_chars: int = MAX_CHARS_PER_FIELD) -> str:
     if value is None:
