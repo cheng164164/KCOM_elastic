@@ -16,8 +16,33 @@ es = get_es_client()
 # SEARCH_FIELDS = get_searchable_fields(es, ELASTIC_INDEX)
 # print(f"[INFO] Auto-detected SEARCH_FIELDS: {SEARCH_FIELDS}")
 
-SEARCH_FIELDS=["combined_field", "body_content", "meta_description", "kx_description", "headings", "kx_title", "body", "title", "meta_keywords"]
-RETURN_FIELDS=["combined_field", "body_content", "meta_description", "kx_description", "headings", "kx_title", "body", "title", "meta_keywords"]
+# BM25 fields only. Do NOT include the semantic_text field here.
+SEARCH_FIELDS = [
+    "combined_field",
+    "title",
+    "kx_title",
+    "meta_description",
+    "kx_description",
+    "body_content",
+    "body",
+    "meta_keywords",
+]
+
+RETURN_FIELDS = [
+    "combined_field",
+    "body_content",
+    "meta_description",
+    "kx_description",
+    "kx_title",
+    "body",
+    "title",
+    "meta_keywords",
+]
+
+
+# Hardcoded semantic settings
+SEMANTIC_FIELD = "body_content_semantic"
+SEMANTIC_INFERENCE_ID = ".elser_model_2_linux-x86_64"
 
 def safe_text(value: Any, max_chars: int = MAX_CHARS_PER_FIELD) -> str:
     if value is None:
@@ -31,6 +56,9 @@ def safe_text(value: Any, max_chars: int = MAX_CHARS_PER_FIELD) -> str:
 
 
 def build_search_query(question: str, top_k: int) -> Dict[str, Any]:
+    """
+    BM25 / full-text only
+    """
     return {
         "size": top_k,
         "query": {
@@ -40,6 +68,82 @@ def build_search_query(question: str, top_k: int) -> Dict[str, Any]:
                 "type": "best_fields",
                 "operator": "or",
                 "fuzziness": "AUTO",
+            }
+        },
+        "_source": RETURN_FIELDS,
+    }
+
+
+def build_hybrid_query(question: str, top_k: int) -> Dict[str, Any]:
+    """
+    Hybrid search without RRF:
+    BM25 + semantic query on semantic_text field
+    """
+    return {
+        "size": top_k,
+        "query": {
+            "bool": {
+                "should": [
+                    {
+                        "multi_match": {
+                            "query": question,
+                            "fields": SEARCH_FIELDS,
+                            "type": "best_fields",
+                            "operator": "or",
+                            "fuzziness": "AUTO",
+                            "boost": 1.0,
+                        }
+                    },
+                    {
+                        "semantic": {
+                            "field": SEMANTIC_FIELD,
+                            "query": question,
+                            "boost": 2.0,
+                        }
+                    },
+                ],
+                "minimum_should_match": 1,
+            }
+        },
+        "_source": RETURN_FIELDS,
+    }
+
+
+def build_rrf_query(question: str, top_k: int) -> Dict[str, Any]:
+    """
+    Hybrid search with RRF using retrievers.
+    Lexical retriever + semantic retriever.
+    """
+    return {
+        "size": top_k,
+        "retriever": {
+            "rrf": {
+                "retrievers": [
+                    {
+                        "standard": {
+                            "query": {
+                                "multi_match": {
+                                    "query": question,
+                                    "fields": SEARCH_FIELDS,
+                                    "type": "best_fields",
+                                    "operator": "or",
+                                    "fuzziness": "AUTO",
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "standard": {
+                            "query": {
+                                "semantic": {
+                                    "field": SEMANTIC_FIELD,
+                                    "query": question}
+                            }
+                        }
+                    },
+                ],
+                "rank_constant": 20,
+                "rank_window_size": 50,
             }
         },
         "_source": RETURN_FIELDS,
@@ -102,11 +206,19 @@ def generate_answer(question: str, context: str) -> str:
     return response.choices[0].message.content.strip()
 
 
-def answer_question(question: str, top_k: int = None) -> Dict[str, Any]:
+def answer_question(question: str, top_k: int = None, mode: str = "hybrid") -> Dict[str, Any]:
     top_k = top_k or TOP_K
+
+    if mode == "rrf":
+        query_body = build_rrf_query(question, top_k)
+    elif mode == "hybrid":
+        query_body = build_hybrid_query(question, top_k)
+    else:
+        query_body = build_search_query(question, top_k)
+
     response = es.search(
         index=ELASTIC_INDEX,
-        body=build_search_query(question, top_k),
+        body=query_body,
     )
 
     raw_hits = response.get("hits", {}).get("hits", [])
@@ -114,19 +226,14 @@ def answer_question(question: str, top_k: int = None) -> Dict[str, Any]:
     context = build_context(hits)
 
     if not hits:
-        answer = (
-            "I could not find relevant information in the Elasticsearch index "
-            "to answer that question."
-        )
+        answer = "I could not find relevant information in the Elasticsearch index."
     else:
-        answer = generate_answer(
-            question=question,
-            context=context
-        )
+        answer = generate_answer(question=question, context=context)
 
     return {
         "question": question,
         "answer": answer,
+        "mode": mode,
         "index": ELASTIC_INDEX,
         "results": hits,
     }
