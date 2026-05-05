@@ -6,7 +6,7 @@ from fastapi.templating import Jinja2Templates
 from app.models import ChatRequest
 from app.search import answer_question
 from app.elastic_client import get_es_client
-from app.config import ELASTIC_INDEX
+from app.config import CONTENT_INDEX, PARTS_INDEX
 
 app = FastAPI(title="Elastic + Azure OpenAI Chatbot", version="0.3.0")
 
@@ -27,7 +27,7 @@ def home(request: Request):
             "question": "",
             "answer": "",
             "results": [],
-            "index": ELASTIC_INDEX,
+            "index": CONTENT_INDEX,
             "error": "",
             "top_k": 5, 
         },
@@ -49,7 +49,7 @@ def ask_question(request: Request, question: str = Form(...), top_k: int = Form(
                 "question": "",
                 "answer": "",
                 "results": [],
-                "index": ELASTIC_INDEX,
+                "index": CONTENT_INDEX,
                 "error": "Question cannot be empty.",
                 "top_k": top_k,
             },
@@ -66,7 +66,7 @@ def ask_question(request: Request, question: str = Form(...), top_k: int = Form(
                 "question": result.get("question", question),
                 "answer": result.get("answer", ""),
                 "results": result.get("results", []),
-                "index": result.get("index", ELASTIC_INDEX),
+                "index": result.get("index", CONTENT_INDEX),
                 "error": "",
                 "top_k": top_k,
             },
@@ -79,7 +79,7 @@ def ask_question(request: Request, question: str = Form(...), top_k: int = Form(
                 "question": question,
                 "answer": "",
                 "results": [],
-                "index": ELASTIC_INDEX,
+                "index": CONTENT_INDEX,
                 "error": f"Chat failed: {exc}",
             },
             status_code=500,
@@ -92,8 +92,10 @@ def health():
         es_client = get_es_client()
         return {
             "ping": es_client.ping(),
-            "index": ELASTIC_INDEX,
-            "index_exists": bool(es_client.indices.exists(index=ELASTIC_INDEX)),
+            "content_index": CONTENT_INDEX,
+            "content_index_exists": bool(es_client.indices.exists(index=CONTENT_INDEX)),
+            "parts_index": PARTS_INDEX,
+            "parts_index_exists": bool(es_client.indices.exists(index=PARTS_INDEX)),
         }
     except Exception as e:
         return {"error": str(e)}
