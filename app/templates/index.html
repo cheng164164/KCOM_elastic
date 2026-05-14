@@ -10,7 +10,16 @@
     <div class="page-container">
         <header class="page-header">
             <h1>Elastic + Azure OpenAI Chatbot</h1>
-            <p class="subtext">Index: {{ index }}</p>
+
+            <!-- ✅ Updated index display -->
+            <p class="subtext">
+                {% if index_display %}
+                    {{ "Indexes" if "," in index_display else "Index" }}:
+                    {{ index_display }}
+                {% else %}
+                    Index: {{ index }}
+                {% endif %}
+            </p>
         </header>
 
         <section class="card">

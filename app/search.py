@@ -5,8 +5,14 @@ import re
 from app.config import (
     AZURE_OPENAI_CHAT_DEPLOYMENT,
     CONTENT_INDEX,
+    CONTENT_INDEXES,
+    CONTENT_PHRASE_FIELDS,
     CONTENT_RETURN_ALL_FIELDS,
+    CONTENT_RRF_RANK_CONSTANT,
+    CONTENT_RRF_RANK_WINDOW_SIZE,
     CONTENT_SEARCH_FIELDS,
+    CONTENT_SEARCH_MODE,
+    CONTENT_SEMANTIC_FIELD,
     MAX_CHARS_PER_FIELD,
     PARTS_INDEX,
     PARTS_RETURN_ALL_FIELDS,
@@ -19,8 +25,7 @@ from app.openai_client import get_azure_openai_client
 
 es = get_es_client()
 
-# Content index settings
-CONTENT_SEMANTIC_FIELD = "body_content_semantic"
+PARTS_EFFECTIVE_SEARCH_FIELDS = list(dict.fromkeys(PARTS_SEARCH_FIELDS))
 
 
 def safe_text(value: Any, max_chars: int = MAX_CHARS_PER_FIELD) -> str:
@@ -39,37 +44,6 @@ def safe_text(value: Any, max_chars: int = MAX_CHARS_PER_FIELD) -> str:
     return text
 
 
-
-def get_indexed_name_category_fields(es, index: str) -> List[str]:
-    mapping = es.indices.get_mapping(index=index)
-    properties = mapping[index]["mappings"].get("properties", {})
-
-    fields: List[str] = []
-    for field, value in properties.items():
-        if not field.startswith("name_category_"):
-            continue
-
-        field_type = value.get("type")
-        is_indexed = value.get("index", True)
-
-        if field_type in {"text", "keyword"} and is_indexed:
-            fields.append(field)
-
-        for subfield, subvalue in value.get("fields", {}).items():
-            sub_type = subvalue.get("type")
-            sub_indexed = subvalue.get("index", True)
-            if sub_type in {"text", "keyword"} and sub_indexed:
-                fields.append(f"{field}.{subfield}")
-
-    return fields
-
-
-#PARTS_CATEGORY_FIELDS = get_indexed_name_category_fields(es, PARTS_INDEX)
-PARTS_EFFECTIVE_SEARCH_FIELDS = list(
-    dict.fromkeys(PARTS_SEARCH_FIELDS)
-)
-
-
 def get_return_fields(route: str) -> Union[List[str], bool]:
     if route == "parts":
         return True if PARTS_RETURN_ALL_FIELDS else PARTS_EFFECTIVE_SEARCH_FIELDS
@@ -85,7 +59,7 @@ def classify_query_route(question: str) -> Tuple[str, str]:
         "Choose 'parts' when the question is about part numbers, SKUs, replacement parts, "
         "part recommendations, part categories, parts selection, or part lookup. "
         "Choose 'content' for general Komatsu website content, machine information, brochures, "
-        "features, manuals, specifications, documentation, or general informational questions."
+        "features, manuals, specifications, documentation, attached documents, or general informational questions."
     )
 
     try:
@@ -115,7 +89,7 @@ def is_probable_part_number(text: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9]+(?:[- ][A-Za-z0-9]+)+", text))
 
 
-def build_content_search_query(question: str, top_k: int) -> Dict[str, Any]:
+def build_content_lexical_should(question: str) -> List[Dict[str, Any]]:
     should_clauses: List[Dict[str, Any]] = [
         {
             "multi_match": {
@@ -127,19 +101,13 @@ def build_content_search_query(question: str, top_k: int) -> Dict[str, Any]:
         }
     ]
 
-    phrase_candidate_fields = [
-        "combined_field",
-        "kx_description",
-        "kx_title",
-    ]
-
-    for field in phrase_candidate_fields:
+    for field in CONTENT_PHRASE_FIELDS:
         if field in CONTENT_SEARCH_FIELDS:
             should_clauses.append(
                 {
                     "match_phrase": {
                         field: {
-                            "query": question
+                            "query": question,
                         }
                     }
                 }
@@ -157,11 +125,22 @@ def build_content_search_query(question: str, top_k: int) -> Dict[str, Any]:
         }
     )
 
+    return should_clauses
+
+
+def build_content_search_query(question: str, top_k: int) -> Dict[str, Any]:
+    """
+    Regular full-text search.
+
+    This is intentionally kept close to the original implementation. It can be used
+    for one or more content indexes, but the recommended multi-index content mode
+    for now is `rrf`.
+    """
     return {
         "size": top_k,
         "query": {
             "bool": {
-                "should": should_clauses,
+                "should": build_content_lexical_should(question),
                 "minimum_should_match": 1,
             }
         },
@@ -170,48 +149,14 @@ def build_content_search_query(question: str, top_k: int) -> Dict[str, Any]:
 
 
 def build_content_hybrid_query(question: str, top_k: int) -> Dict[str, Any]:
-    phrase_candidate_fields = [
-        "combined_field",
-        "kx_description",
-        "kx_title",
-    ]
+    """
+    Placeholder for the original hybrid behavior: full-text + semantic in a bool query.
 
-    lexical_should: List[Dict[str, Any]] = [
-        {
-            "multi_match": {
-                "query": question,
-                "fields": CONTENT_SEARCH_FIELDS,
-                "type": "most_fields",
-                "operator": "and",
-            }
-        }
-    ]
-
-    # safe phrase matching
-    for field in phrase_candidate_fields:
-        if field in CONTENT_SEARCH_FIELDS:
-            lexical_should.append(
-                {
-                    "match_phrase": {
-                        field: {
-                            "query": question
-                        }
-                    }
-                }
-            )
-
-    # fallback recall
-    lexical_should.append(
-        {
-            "multi_match": {
-                "query": question,
-                "fields": CONTENT_SEARCH_FIELDS,
-                "type": "best_fields",
-                "operator": "or",
-                "fuzziness": "AUTO",
-            }
-        }
-    )
+    Use this mode only when every content index in CONTENT_INDEXES has the semantic
+    field configured, for example body_content_semantic as semantic_text. Until then,
+    prefer CONTENT_SEARCH_MODE=rrf or full_text.
+    """
+    lexical_should = build_content_lexical_should(question)
 
     return {
         "size": top_k,
@@ -239,75 +184,74 @@ def build_content_hybrid_query(question: str, top_k: int) -> Dict[str, Any]:
 
 
 def build_content_rrf_query(question: str, top_k: int) -> Dict[str, Any]:
-    phrase_candidate_fields = [
-        "combined_field",
-        "kx_description",
-        "kx_title",
-    ]
+    """
+    Elasticsearch RRF search using full-text lexical retrievers only.
 
-    lexical_should: List[Dict[str, Any]] = [
+    This mode searches all CONTENT_INDEXES in one Elasticsearch request. It does not
+    use semantic/vector retrieval, so it is safe while one content index has semantic
+    vectors and another one does not.
+    """
+    phrase_should = [
         {
-            "multi_match": {
-                "query": question,
-                "fields": CONTENT_SEARCH_FIELDS,
-                "type": "most_fields",
-                "operator": "and",
+            "match_phrase": {
+                field: {
+                    "query": question,
+                }
             }
         }
+        for field in CONTENT_PHRASE_FIELDS
+        if field in CONTENT_SEARCH_FIELDS
     ]
 
-    for field in phrase_candidate_fields:
-        if field in CONTENT_SEARCH_FIELDS:
-            lexical_should.append(
-                {
-                    "match_phrase": {
-                        field: {
-                            "query": question
+    retrievers: List[Dict[str, Any]] = [
+        {
+            "standard": {
+                "query": {
+                    "multi_match": {
+                        "query": question,
+                        "fields": CONTENT_SEARCH_FIELDS,
+                        "type": "most_fields",
+                        "operator": "and",
+                    }
+                }
+            }
+        },
+        {
+            "standard": {
+                "query": {
+                    "multi_match": {
+                        "query": question,
+                        "fields": CONTENT_SEARCH_FIELDS,
+                        "type": "best_fields",
+                        "operator": "or",
+                        "fuzziness": "AUTO",
+                    }
+                }
+            }
+        },
+    ]
+
+    if phrase_should:
+        retrievers.append(
+            {
+                "standard": {
+                    "query": {
+                        "bool": {
+                            "should": phrase_should,
+                            "minimum_should_match": 1,
                         }
                     }
                 }
-            )
-
-    lexical_should.append(
-        {
-            "multi_match": {
-                "query": question,
-                "fields": CONTENT_SEARCH_FIELDS,
-                "type": "best_fields",
-                "operator": "or",
-                "fuzziness": "AUTO",
             }
-        }
-    )
+        )
 
     return {
         "size": top_k,
         "retriever": {
             "rrf": {
-                "retrievers": [
-                    {
-                        "standard": {
-                            "query": {
-                                "bool": {
-                                    "should": lexical_should,
-                                    "minimum_should_match": 1,
-                                }
-                            }
-                        }
-                    },
-                    {
-                        "standard": {
-                            "query": {
-                                "semantic": {
-                                    "field": CONTENT_SEMANTIC_FIELD,
-                                    "query": question,
-                                }
-                            }
-                        }
-                    },
-                ],
-                "rank_constant": 20,
-                "rank_window_size": 50,
+                "retrievers": retrievers,
+                "rank_constant": CONTENT_RRF_RANK_CONSTANT,
+                "rank_window_size": max(CONTENT_RRF_RANK_WINDOW_SIZE, top_k),
             }
         },
         "_source": get_return_fields("content"),
@@ -326,38 +270,17 @@ def build_parts_search_query(question: str, top_k: int) -> Dict[str, Any]:
         }
     ]
 
-    if "short_description" in PARTS_EFFECTIVE_SEARCH_FIELDS:
-        should_clauses.append(
-            {
-                "match_phrase": {
-                    "short_description": {
-                        "query": question
+    for field in ["short_description", "combined_field", "description"]:
+        if field in PARTS_EFFECTIVE_SEARCH_FIELDS:
+            should_clauses.append(
+                {
+                    "match_phrase": {
+                        field: {
+                            "query": question,
+                        }
                     }
                 }
-            }
-        )
-
-    if "combined_field" in PARTS_EFFECTIVE_SEARCH_FIELDS:
-        should_clauses.append(
-            {
-                "match_phrase": {
-                    "combined_field": {
-                        "query": question
-                    }
-                }
-            }
-        )
-
-    if "description" in PARTS_EFFECTIVE_SEARCH_FIELDS:
-        should_clauses.append(
-            {
-                "match_phrase": {
-                    "description": {
-                        "query": question
-                    }
-                }
-            }
-        )
+            )
 
     should_clauses.append(
         {
@@ -394,14 +317,14 @@ def build_parts_search_query(question: str, top_k: int) -> Dict[str, Any]:
     }
 
 
-def build_query(question: str, top_k: int, route: str, mode: str) -> Dict[str, Any]:
+def build_query(question: str, top_k: int, route: str) -> Dict[str, Any]:
     if route == "parts":
         return build_parts_search_query(question, top_k)
 
-    if mode == "rrf":
-        return build_content_rrf_query(question, top_k)
-    if mode == "hybrid":
+    if CONTENT_SEARCH_MODE == "hybrid":
         return build_content_hybrid_query(question, top_k)
+    if CONTENT_SEARCH_MODE == "rrf":
+        return build_content_rrf_query(question, top_k)
     return build_content_search_query(question, top_k)
 
 
@@ -410,6 +333,7 @@ def format_hit(hit: Dict[str, Any], route: str) -> Dict[str, Any]:
     item = {
         "score": hit.get("_score"),
         "id": hit.get("_id"),
+        "index": hit.get("_index"),
         "fields": {},
     }
 
@@ -418,10 +342,17 @@ def format_hit(hit: Dict[str, Any], route: str) -> Dict[str, Any]:
             item["fields"][field] = safe_text(value)
         return item
 
+    if route == "content" and CONTENT_RETURN_ALL_FIELDS:
+        for field, value in source.items():
+            item["fields"][field] = safe_text(value)
+        return item
+
     fields_to_return = CONTENT_SEARCH_FIELDS if route == "content" else PARTS_EFFECTIVE_SEARCH_FIELDS
     for field in fields_to_return:
-        if field in source:
-            item["fields"][field] = safe_text(source.get(field))
+        # Ignore field boost suffixes if user ever configures fields like title^2.
+        plain_field = field.split("^", 1)[0]
+        if plain_field in source:
+            item["fields"][plain_field] = safe_text(source.get(plain_field))
     return item
 
 
@@ -433,6 +364,8 @@ def build_context(hits: List[Dict[str, Any]], route: str) -> str:
     for i, hit in enumerate(hits, start=1):
         fields = hit.get("fields", {})
         lines.append(f"[Document {i}]")
+        if hit.get("index"):
+            lines.append(f"index: {hit.get('index')}")
 
         if route == "parts":
             url = fields.get("url") or fields.get("url_key") or ""
@@ -510,20 +443,25 @@ def generate_answer(question: str, context: str, route: str) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
-def answer_question(question: str, top_k: int = None, mode: str = "") -> Dict[str, Any]:
+def get_content_search_indexes() -> List[str]:
+    return CONTENT_INDEXES or [CONTENT_INDEX]
+
+
+def get_content_search_index_name() -> str:
+    return ",".join(get_content_search_indexes())
+
+
+def answer_question(question: str, top_k: int = None) -> Dict[str, Any]:
     route, route_reason = classify_query_route(question)
 
     effective_top_k = top_k or TOP_K
-    if route == "parts" and effective_top_k < 10:
-        effective_top_k = 10
-
     query_body = build_query(
         question=question,
         top_k=effective_top_k,
         route=route,
-        mode=mode,
     )
-    index_name = PARTS_INDEX if route == "parts" else CONTENT_INDEX
+    searched_indexes = [PARTS_INDEX] if route == "parts" else get_content_search_indexes()
+    index_name = ",".join(searched_indexes)
 
     response = es.search(index=index_name, body=query_body)
 
@@ -539,9 +477,11 @@ def answer_question(question: str, top_k: int = None, mode: str = "") -> Dict[st
     return {
         "question": question,
         "answer": answer,
-        "mode": mode,
+        "mode": CONTENT_SEARCH_MODE if route == "content" else "parts_full_text",
         "route": route,
         "route_reason": route_reason,
         "index": index_name,
+        "searched_indexes": searched_indexes,
+        "index_display": ", ".join(searched_indexes),
         "results": hits,
     }
